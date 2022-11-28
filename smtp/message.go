@@ -1,10 +1,14 @@
 package smtp
 
+import "strings"
+
 type Message struct {
-	from       string
-	recipients []string
-	subject    string
-	content    string
+	From    string
+	To      string
+	Cc      string
+	Bcc     string
+	Subject string
+	Content string
 }
 
 func NewMessage() *Message {
@@ -12,7 +16,23 @@ func NewMessage() *Message {
 	return message
 }
 
-func (msg *Message) AddRecipient(rcpt string) *Message {
-	msg.recipients = append(msg.recipients, rcpt)
-	return msg
+func (m *Message) GetRecipients() (recipients []string) {
+	if m.To != "" {
+		recipients = append(recipients, m.To)
+	}
+	if m.Cc != "" {
+		recipients = append(recipients, m.Cc)
+	}
+	if m.Bcc != "" {
+		recipients = append(recipients, m.Bcc)
+	}
+	return
+}
+
+func (m *Message) ToMime() (content string) {
+	builder := strings.Builder{}
+	builder.WriteString("Subject: " + m.Subject + "\n")
+	builder.WriteString("\n")
+	builder.WriteString(m.Content)
+	return builder.String()
 }
