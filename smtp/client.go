@@ -1,10 +1,10 @@
 package smtp
 
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"net"
+	"net/textproto"
 	"sort"
 	"strings"
 	"time"
@@ -47,7 +47,7 @@ type SMTPClient struct {
 	Host    string
 	Port    uint32
 	Timeout time.Duration
-	conn    net.Conn
+	conn    *textproto.Conn
 }
 
 func NewClient() *SMTPClient {
@@ -81,43 +81,80 @@ func (c *SMTPClient) CreateConnection(hostname string) (conn net.Conn, err error
 }
 
 func (c *SMTPClient) SetConnection(conn net.Conn) {
-	c.conn = conn
-}
-
-func (c *SMTPClient) ExecuteCommand(cmd string, args ...interface{}) error {
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, cmd+"\n", args...)
-	_, err := c.conn.Write(buf.Bytes())
-	return err
+	c.conn = textproto.NewConn(conn)
 }
 
 func (c *SMTPClient) Quit() {
-	c.ExecuteCommand("QUIT\n")
+	c.conn.Cmd("QUIT")
 }
 
-func (c *SMTPClient) PostMessage(hostname string, from string, recipients []string, content string) {
-	conn, err := c.CreateConnection(hostname)
-	checkError(err)
-	c.SetConnection(conn)
-	// reply := make([]byte, 1024)
-	// _, err = conn.Read(reply)
-	// checkError(err)
-	// log.Println(string(reply))
-	c.ExecuteCommand("EHLO %s", "localhost")
-	c.ExecuteCommand("MAIL FROM:<%s>", from)
-	for _, rcpt := range recipients {
-		c.ExecuteCommand("RCPT TO:<%s>", rcpt)
+func (c *SMTPClient) ExecuteCommand(cmd string, args ...any) func(int) (string, error) {
+	id, err := c.conn.Cmd(cmd, args...)
+	return func(expectCode int) (string, error) {
+		if err != nil {
+			return "", err
+		}
+		c.conn.StartResponse(id)
+		defer c.conn.EndResponse(id)
+		_, output, err := c.conn.ReadCodeLine(expectCode)
+		if err != nil {
+			log.Fatal(cmd, "->", err, output)
+		}
+		return output, err
 	}
-	c.ExecuteCommand("DATA")
-	c.ExecuteCommand(content + "")
-	c.ExecuteCommand(".")
-	c.ExecuteCommand("")
+}
+
+func (c *SMTPClient) Hello() {
+
+}
+
+func (c *SMTPClient) PostMessage(hostname string, from string, recipients []string, content string) error {
+	conn, err := c.CreateConnection(hostname)
+	if err != nil {
+		return err
+	}
+
+	c.SetConnection(conn)
+
+	_, err = c.ExecuteCommand("EHLO %s", "localhost")(220)
+	if err != nil {
+		return err
+	}
+
+	_, err = c.ExecuteCommand("MAIL FROM: %s", from)(250)
+	if err != nil {
+		return err
+	}
+
+	for _, rcpt := range recipients {
+		_, err = c.ExecuteCommand("RCPT TO:<%s>", rcpt)(250)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = c.ExecuteCommand("DATA")(250)
+	if err != nil {
+		return err
+	}
+
+	c.conn.W.Write([]byte(content))
+	c.conn.W.Write([]byte("\r\n"))
+	_, err = c.ExecuteCommand(".")(354)
+	if err != nil {
+		return err
+	}
+
+	c.Close()
+
+	return nil
 }
 
 func (c *SMTPClient) Send(msg *Message) {
-	hosts := groupByHost(msg.GetRecipients())
-	for hostname, repts := range hosts {
-		c.PostMessage(hostname, msg.From, repts, msg.ToMime())
+	for hostname, repts := range groupByHost(msg.GetRecipients()) {
+		err := c.PostMessage(hostname, msg.From, repts, msg.ToMime())
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 }
 
